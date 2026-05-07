@@ -4,28 +4,73 @@ warnings.filterwarnings("ignore")
 import cv2
 import mediapipe as mp
 import joblib
-import os
 import time
+import threading
+import os
 
-# Load model đã train
+from gtts import gTTS
+from playsound import playsound
+
+from PIL import Image, ImageDraw, ImageFont
+import numpy as np
+
+# ===== FONT =====
+font_path = "C:/Windows/Fonts/tahoma.ttf"
+
+def draw_text(frame, text, position, size=40, color=(255,255,255)):
+    img_pil = Image.fromarray(frame)
+    draw = ImageDraw.Draw(img_pil)
+    font = ImageFont.truetype(font_path, size)
+    draw.text(position, text, font=font, fill=color)
+    return np.array(img_pil)
+
+# ===== TTS =====
+is_speaking = False
+
+def speak(text):
+    global is_speaking
+
+    def run():
+        global is_speaking
+        try:
+            is_speaking = True
+            filename = "voice.mp3"
+
+            tts = gTTS(text=text, lang='vi')
+            tts.save(filename)
+
+            playsound(filename)
+
+            if os.path.exists(filename):
+                os.remove(filename)
+
+        except:
+            pass
+
+        is_speaking = False
+
+    if not is_speaking:
+        threading.Thread(target=run).start()
+
+# ===== LOAD MODEL =====
 model = joblib.load("hand_model.pkl")
 
-# MediaPipe setup
+# ===== MEDIAPIPE =====
 mp_hands = mp.solutions.hands
 hands = mp_hands.Hands()
 mp_draw = mp.solutions.drawing_utils
 
-# Mở webcam
+# ===== CAMERA =====
 cap = cv2.VideoCapture(0)
 
-# Biến điều khiển auto đọc
+# ===== STATE =====
 current_label = ""
 candidate_label = ""
 candidate_start_time = 0
 last_spoken_label = ""
 
-speak_hold_time = 0.8   # giữ label ổn định 1 giây thì đọc
-no_hand_reset_time = 1.0  # mất tay 1 giây thì cho phép đọc lại
+speak_hold_time = 0.8
+no_hand_reset_time = 1.0
 last_hand_seen_time = time.time()
 
 while True:
@@ -34,6 +79,8 @@ while True:
         break
 
     frame = cv2.flip(frame, 1)
+    h, w, _ = frame.shape
+
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     result = hands.process(rgb)
 
@@ -45,56 +92,66 @@ while True:
         for hand_landmarks in result.multi_hand_landmarks:
             mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
 
-            # Lấy dữ liệu keypoints
+            # ===== NORMALIZE =====
             row = []
-            for lm in hand_landmarks.landmark:
-                row.append(lm.x)
-                row.append(lm.y)
+            base_x = hand_landmarks.landmark[0].x
+            base_y = hand_landmarks.landmark[0].y
 
-            # Dự đoán
+            for lm in hand_landmarks.landmark:
+                row.append(lm.x - base_x)
+                row.append(lm.y - base_y)
+
             prediction = model.predict([row])
             detected_label = prediction[0]
 
     current_label = detected_label
     now = time.time()
 
-    # ===== LOGIC AUTO ĐỌC =====
+    status_text = "Chưa nhận diện"
+    status_color = (200, 200, 200)
+
+    # ===== AUTO SPEAK =====
     if current_label != "":
-        # Nếu label mới xuất hiện
+        status_text = "Đang nhận diện"
+        status_color = (0, 255, 0)
+
         if current_label != candidate_label:
             candidate_label = current_label
             candidate_start_time = now
 
-        # Nếu label giữ ổn định đủ lâu và chưa đọc
-        elif (now - candidate_start_time >= speak_hold_time) and (current_label != last_spoken_label):
-            print("Auto speaking:", current_label)
-
-            command = f'''PowerShell -Command "Add-Type -AssemblyName System.Speech; \
-$speak = New-Object System.Speech.Synthesis.SpeechSynthesizer; \
-$speak.Speak('{current_label}');"'''
-            os.system(command)
-
-            last_spoken_label = current_label
+        elif now - candidate_start_time >= speak_hold_time:
+            if current_label != last_spoken_label:
+                speak(current_label)
+                last_spoken_label = current_label
+                status_text = "Đang phát âm"
+                status_color = (0, 200, 255)
 
     else:
-        # Nếu không thấy tay trong 1 khoảng thời gian -> reset để giơ lại sẽ đọc lại
         if now - last_hand_seen_time >= no_hand_reset_time:
             candidate_label = ""
             candidate_start_time = 0
             last_spoken_label = ""
 
-    # ===== HIỂN THỊ =====
-    cv2.putText(frame, f"Prediction: {current_label}", (10, 50),
-                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+    # ===== UI PANEL =====
+    overlay = frame.copy()
 
-    cv2.putText(frame, "Auto Speak ON | Q to quit", (10, 90),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+    # box nền
+    cv2.rectangle(overlay, (0, 0), (w, 120), (0, 0, 0), -1)
+    alpha = 0.6
+    frame = cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0)
 
-    cv2.imshow("Realtime Prediction", frame)
+    # ===== TEXT =====
+    frame = draw_text(frame, "Hand Sign Recognition", (10, 5), 30)
+    frame = draw_text(frame, f" {current_label}", (10, 40), 50, (0,255,0))
 
-    key = cv2.waitKey(1) & 0xFF
+    frame = draw_text(frame, status_text, (10, 85), 28, status_color)
 
-    if key == ord('q'):
+    # hint
+    frame = draw_text(frame, "Nhấn Q để thoát", (w-250, 85), 25, (200,200,200))
+
+    cv2.imshow("AI Demo", frame)
+
+    if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
 cap.release()
